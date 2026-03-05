@@ -9,7 +9,7 @@ MVP implemented in Node.js:
 - Relay client with hello handshake, command execution, and ack responses
 - CI + tag-based release artifact workflow
 
-## Quickstart
+## Quickstart (Local dev)
 
 ### 1) Install deps
 ```bash
@@ -44,6 +44,40 @@ curl -sS -X POST http://127.0.0.1:8080/command \
   -H 'content-type: application/json' \
   -d '{"claw_id":"my-laptop","cmd":"hook.run","args":{"name":"sync"}}'
 ```
+
+## Quickstart (Docker Compose)
+```bash
+cp .env.example .env
+# edit .env with ADMIN_TOKEN + RELAY_TOKEN
+
+docker compose up -d --build
+```
+
+Generate a token and update `.env`:
+```bash
+curl -sS -X POST http://127.0.0.1:8080/token \
+  -H "x-admin-token: <ADMIN_TOKEN>" \
+  -H "content-type: application/json" \
+  -d '{"claw_id":"local-client","scopes":["command"]}'
+```
+
+## Self-hosted vs Public Relay
+- **Self-hosted (LAN/dev):** use `ws://127.0.0.1:8080/ws` or `ws://<server-ip>:8080/ws`.
+- **Public relay (TLS):** use `wss://your-domain/ws` and protect `ADMIN_TOKEN`.
+
+## Healthcheck
+```bash
+curl -sS http://127.0.0.1:8080/health
+```
+
+## Config + Env Examples
+- Server env template: `server/.env.example`
+- Client env template: `client/.env.example`
+- Compose env template: `.env.example`
+- Client JSON config: `client/config.example.json`
+
+## Coolify
+See `docs/coolify.md` for a step-by-step deployment template.
 
 ## Development
 - Run tests: `npm test`
