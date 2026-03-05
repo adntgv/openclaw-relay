@@ -1,64 +1,64 @@
 # OpenClaw Relay
 
-A lightweight, self-hosted relay that lets multiple OpenClaw clients connect to a single hub for command routing, telemetry, and remote orchestration.
+Self-hosted relay for OpenClaw clients using a WebSocket hub and JSON envelope protocol.
 
-> **Status:** scaffolding + docs. Implementation can start immediately.
+## Status
+MVP implemented in Node.js:
+- Relay server with `/ws` WebSocket endpoint
+- Admin APIs: `/health`, `/token`, `/clients`, `/command`, `/audit`
+- Relay client with hello handshake, command execution, and ack responses
+- CI + tag-based release artifact workflow
 
-## What this repo contains
-- **Relay server** (planned): WebSocket hub with token auth, routing, and audit logs.
-- **Relay client** (planned): tiny agent that connects to the hub, executes hooks, returns results.
-- **OpenClaw skill** (included): CLI scaffolding to deploy, generate tokens, and manage clients.
-- **Protocol spec**: message schema, auth handshake, and envelope format.
+## Quickstart
 
-## Quickstart (once implemented)
+### 1) Install deps
 ```bash
-# 1) Run relay (Docker)
-docker compose up -d
-
-# 2) Create a token
-openclaw relay token create --claw-id my-laptop
-
-# 3) Install client
-openclaw relay client install --url wss://relay.example.com --token <TOKEN>
-
-# 4) Check status
-openclaw relay status
+npm install
 ```
+
+### 2) Start server
+```bash
+ADMIN_TOKEN=dev-admin-token npm run start:server
+```
+
+### 3) Issue a client token
+```bash
+curl -sS -X POST http://127.0.0.1:8080/token \
+  -H 'x-admin-token: dev-admin-token' \
+  -H 'content-type: application/json' \
+  -d '{"claw_id":"my-laptop","scopes":["command"]}'
+```
+
+### 4) Start client
+```bash
+RELAY_URL=ws://127.0.0.1:8080/ws \
+RELAY_TOKEN=<TOKEN_FROM_STEP_3> \
+CLAW_ID=my-laptop \
+npm run start:client
+```
+
+### 5) Dispatch a command
+```bash
+curl -sS -X POST http://127.0.0.1:8080/command \
+  -H 'x-admin-token: dev-admin-token' \
+  -H 'content-type: application/json' \
+  -d '{"claw_id":"my-laptop","cmd":"hook.run","args":{"name":"sync"}}'
+```
+
+## Development
+- Run tests: `npm test`
+- Build release bundle: `npm run build`
 
 ## Repository layout
 ```
 openclaw-relay/
   docs/
-    IMPLEMENTATION_PLAN.md
-    ARCHITECTURE.md
   protocol/
-    relay-protocol.md
   server/
-    README.md
-    .env.example
   client/
-    README.md
-    config.example.json
-  skill/
-    SKILL.md
-    scripts/relay.sh
-    templates/
-  LICENSE
-  CONTRIBUTING.md
-  .gitignore
+  src/
+  tests/
 ```
-
-## MVP scope
-- WebSocket relay hub
-- Token auth + scope
-- Client registration
-- Command routing
-- Result ACK + logs
-
-## Next steps
-1. Implement the server (Go or Node).
-2. Implement the client (Go recommended for tiny binaries).
-3. Wire OpenClaw skill commands to admin API.
 
 ## License
 MIT
