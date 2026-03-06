@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -30,8 +34,11 @@ func main() {
 	case "client":
 		runClient(os.Args[2:])
 	case "token":
-		fmt.Println("token subcommand not implemented yet (Phase 5)")
-		os.Exit(1)
+		runToken(os.Args[2:])
+	case "clients":
+		runClients(os.Args[2:])
+	case "send":
+		runSend(os.Args[2:])
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -49,16 +56,19 @@ Usage:
 
 Commands:
   server    Start the relay server
-  client    Start the relay client (not yet implemented)
-  token     Manage authentication tokens (not yet implemented)
+  client    Start the relay client
+  token     Manage authentication tokens (issue/revoke)
+  clients   List connected clients
+  send      Send a command to a client
   help      Show this help message
 
 Examples:
-  relay server --port 8080 --admin-token secret
-  relay client --url ws://localhost:8080/ws --token <jwt>
-
-For more information on a command:
-  relay <command> --help`)
+  relay server --port 8080 --admin-token secret --jwt-secret mysecret
+  relay client --url ws://localhost:8080/ws --token <jwt> --claw-id mynode
+  relay token issue --admin-token secret --claw-id mynode --scopes shell
+  relay token revoke --admin-token secret --jti <token-jti>
+  relay clients --admin-token secret
+  relay send --admin-token secret --claw-id mynode --cmd shell.exec --args '{"command":"echo hi"}'`)
 }
 
 func runServer(args []string) {
@@ -150,4 +160,100 @@ func runClient(args []string) {
 	if err := client.Run(); err != nil {
 		log.Fatalf("client error: %v", err)
 	}
+}
+
+func runToken(args []string) {
+	if len(args) < 1 {
+		fmt.Println("Usage: relay token <issue|revoke> [options]")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "issue":
+		fs := flag.NewFlagSet("token issue", flag.ExitOnError)
+		serverURL := fs.String("server", "http://localhost:8080", "Server URL")
+		adminToken := fs.String("admin-token", "", "Admin token")
+		clawID := fs.String("claw-id", "", "Client ID for token")
+		scopes := fs.String("scopes", "shell", "Comma-separated scopes")
+		ttl := fs.Int("ttl", 24, "Token TTL in hours")
+		fs.Parse(args[1:])
+
+		body, _ := json.Marshal(map[string]interface{}{
+			"claw_id":   *clawID,
+			"scopes":    strings.Split(*scopes, ","),
+			"ttl_hours": *ttl,
+		})
+		resp := adminRequest("POST", *serverURL+"/token", *adminToken, body)
+		fmt.Println(resp)
+
+	case "revoke":
+		fs := flag.NewFlagSet("token revoke", flag.ExitOnError)
+		serverURL := fs.String("server", "http://localhost:8080", "Server URL")
+		adminToken := fs.String("admin-token", "", "Admin token")
+		jti := fs.String("jti", "", "Token JTI to revoke")
+		fs.Parse(args[1:])
+
+		adminRequest("DELETE", *serverURL+"/token/"+*jti, *adminToken, nil)
+		fmt.Println("Token revoked")
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown token command: %s\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func runClients(args []string) {
+	fs := flag.NewFlagSet("clients", flag.ExitOnError)
+	serverURL := fs.String("server", "http://localhost:8080", "Server URL")
+	adminToken := fs.String("admin-token", "", "Admin token")
+	fs.Parse(args)
+
+	resp := adminRequest("GET", *serverURL+"/clients", *adminToken, nil)
+	fmt.Println(resp)
+}
+
+func runSend(args []string) {
+	fs := flag.NewFlagSet("send", flag.ExitOnError)
+	serverURL := fs.String("server", "http://localhost:8080", "Server URL")
+	adminToken := fs.String("admin-token", "", "Admin token")
+	clawID := fs.String("claw-id", "", "Target client")
+	cmd := fs.String("cmd", "", "Command to send")
+	argsJSON := fs.String("args", "{}", "JSON args")
+	fs.Parse(args)
+
+	var cmdArgs map[string]interface{}
+	json.Unmarshal([]byte(*argsJSON), &cmdArgs)
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"claw_id": *clawID,
+		"cmd":     *cmd,
+		"args":    cmdArgs,
+	})
+	resp := adminRequest("POST", *serverURL+"/command", *adminToken, body)
+	fmt.Println(resp)
+}
+
+func adminRequest(method, url, adminToken string, body []byte) string {
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, reqBody)
+	if err != nil {
+		log.Fatalf("request error: %v", err)
+	}
+	req.Header.Set("X-Admin-Token", adminToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		log.Fatalf("server error (%d): %s", resp.StatusCode, string(data))
+	}
+	return string(data)
 }

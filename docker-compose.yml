@@ -2,30 +2,27 @@ services:
   relay-server:
     build:
       context: .
-      dockerfile: Dockerfile.server
+      dockerfile: deployments/Dockerfile
     ports:
       - "8080:8080"
     environment:
-      PORT: 8080
-      HOST: 0.0.0.0
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token}
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 5s
+      RELAY_PORT: "8080"
+      RELAY_HOST: "0.0.0.0"
+      RELAY_ADMIN_TOKEN: "${RELAY_ADMIN_TOKEN:-changeme}"
+      RELAY_JWT_SECRET: "${RELAY_JWT_SECRET:-changeme}"
+    command: ["server", "--port", "8080", "--admin-token", "${RELAY_ADMIN_TOKEN:-changeme}", "--jwt-secret", "${RELAY_JWT_SECRET:-changeme}"]
+    restart: unless-stopped
 
   relay-client:
     build:
       context: .
-      dockerfile: Dockerfile.client
-    depends_on:
-      relay-server:
-        condition: service_healthy
+      dockerfile: deployments/Dockerfile
     environment:
-      RELAY_URL: ${RELAY_URL:-ws://relay-server:8080/ws}
-      RELAY_TOKEN: ${RELAY_TOKEN:-}
-      CLAW_ID: ${CLAW_ID:-local-client}
-      CAPABILITIES: ${CAPABILITIES:-shell}
-      CLIENT_VERSION: ${CLIENT_VERSION:-0.1.0}
+      RELAY_URL: "ws://relay-server:8080/ws"
+      RELAY_TOKEN: "${RELAY_CLIENT_TOKEN}"
+      RELAY_CLAW_ID: "${RELAY_CLAW_ID:-default-client}"
+      RELAY_CAPABILITIES: "${RELAY_CAPABILITIES:-shell}"
+    command: ["client", "--url", "ws://relay-server:8080/ws", "--token", "${RELAY_CLIENT_TOKEN}", "--claw-id", "${RELAY_CLAW_ID:-default-client}"]
+    depends_on:
+      - relay-server
+    restart: unless-stopped

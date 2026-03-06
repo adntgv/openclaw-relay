@@ -1,98 +1,91 @@
 # OpenClaw Relay
 
-Self-hosted relay for OpenClaw clients using a WebSocket hub and JSON envelope protocol.
+A WebSocket relay server and client for dispatching commands to remote nodes. Single Go binary with subcommands.
 
-## Status
-MVP implemented in Node.js:
-- Relay server with `/ws` WebSocket endpoint
-- Admin APIs: `/health`, `/token`, `/clients`, `/command`, `/audit`
-- Relay client with hello handshake, command execution, and ack responses
-- CI + tag-based release artifact workflow
+## Quick Start
 
-## Quickstart (Local dev)
-
-### 1) Install deps
 ```bash
-npm install
+# Build
+make build
+
+# Start server
+./bin/relay server --port 8080 --admin-token secret --jwt-secret mysecret
+
+# Issue a token
+./bin/relay token issue --admin-token secret --claw-id mynode --scopes shell
+
+# Start client
+./bin/relay client --url ws://localhost:8080/ws --token <jwt> --claw-id mynode
+
+# Send a command
+./bin/relay send --admin-token secret --claw-id mynode --cmd shell.exec --args '{"command":"echo hello"}'
+
+# List clients
+./bin/relay clients --admin-token secret
 ```
 
-### 2) Start server
-```bash
-ADMIN_TOKEN=dev-admin-token npm run start:server
+## Architecture
+
+- **Server**: HTTP server with WebSocket endpoint (`/ws`), admin API, JWT auth
+- **Client**: WebSocket client with reconnect, command execution, allowlists
+- **Protocol**: JSON envelopes over WebSocket (hello, command, ack, ping/pong)
+
+## Admin API
+
+All admin endpoints require `X-Admin-Token` header.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check (no auth) |
+| POST | `/token` | Issue JWT token |
+| DELETE | `/token/{jti}` | Revoke token |
+| GET | `/clients` | List connected clients |
+| POST | `/command` | Dispatch command (sync, 30s timeout) |
+| GET | `/audit` | Audit log |
+
+## Client Config
+
+Create `relay-client.yml`:
+
+```yaml
+url: ws://localhost:8080/ws
+token: <jwt>
+claw_id: mynode
+capabilities:
+  - shell
+allowed_commands:
+  - hook.run
+  - shell.exec
+shell:
+  timeout: 30s
+  allowed_binaries:
+    - /usr/bin/git
+    - /usr/bin/curl
+hooks_dir: ./hooks
 ```
 
-### 3) Issue a client token
+Environment variables (`RELAY_URL`, `RELAY_TOKEN`, `RELAY_CLAW_ID`, `RELAY_CAPABILITIES`) override config file.
+
+## Docker
+
 ```bash
-curl -sS -X POST http://127.0.0.1:8080/token \
-  -H 'x-admin-token: dev-admin-token' \
-  -H 'content-type: application/json' \
-  -d '{"claw_id":"my-laptop","scopes":["command"]}'
+# Build and run
+docker compose up -d
+
+# Or build manually
+docker build -f deployments/Dockerfile -t openclaw-relay .
+docker run -p 8080:8080 openclaw-relay server --admin-token secret --jwt-secret mysecret
 ```
-
-### 4) Start client
-```bash
-RELAY_URL=ws://127.0.0.1:8080/ws \
-RELAY_TOKEN=<TOKEN_FROM_STEP_3> \
-CLAW_ID=my-laptop \
-npm run start:client
-```
-
-### 5) Dispatch a command
-```bash
-curl -sS -X POST http://127.0.0.1:8080/command \
-  -H 'x-admin-token: dev-admin-token' \
-  -H 'content-type: application/json' \
-  -d '{"claw_id":"my-laptop","cmd":"hook.run","args":{"name":"sync"}}'
-```
-
-## Quickstart (Docker Compose)
-```bash
-cp .env.example .env
-# edit .env with ADMIN_TOKEN + RELAY_TOKEN
-
-docker compose up -d --build
-```
-
-Generate a token and update `.env`:
-```bash
-curl -sS -X POST http://127.0.0.1:8080/token \
-  -H "x-admin-token: <ADMIN_TOKEN>" \
-  -H "content-type: application/json" \
-  -d '{"claw_id":"local-client","scopes":["command"]}'
-```
-
-## Self-hosted vs Public Relay
-- **Self-hosted (LAN/dev):** use `ws://127.0.0.1:8080/ws` or `ws://<server-ip>:8080/ws`.
-- **Public relay (TLS):** use `wss://your-domain/ws` and protect `ADMIN_TOKEN`.
-
-## Healthcheck
-```bash
-curl -sS http://127.0.0.1:8080/health
-```
-
-## Config + Env Examples
-- Server env template: `server/.env.example`
-- Client env template: `client/.env.example`
-- Compose env template: `.env.example`
-- Client JSON config: `client/config.example.json`
-
-## Coolify
-See `docs/coolify.md` for a step-by-step deployment template.
 
 ## Development
-- Run tests: `npm test`
-- Build release bundle: `npm run build`
 
-## Repository layout
-```
-openclaw-relay/
-  docs/
-  protocol/
-  server/
-  client/
-  src/
-  tests/
+```bash
+make test      # Run tests
+make build     # Build binary
+make check     # Format, vet, test
+make coverage  # Test with coverage report
 ```
 
 ## License
+
 MIT
