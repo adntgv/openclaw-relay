@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/adntgv/openclaw-relay/internal/protocol"
@@ -31,23 +32,43 @@ type Server struct {
 	tokenStore   *token.Store
 	audit        *AuditLog
 	dispatcher   *Dispatcher
+	rateLimiter  *RateLimiter
 	startTime    time.Time
+	logger       *slog.Logger
+	// Metrics
+	totalConnections atomic.Int64
+	totalCommands    atomic.Int64
 }
 
 // Config holds server configuration
 type Config struct {
-	Host       string
-	Port       int
-	AdminToken string
-	JWTSecret  string
+	Host           string
+	Port           int
+	AdminToken     string
+	JWTSecret      string
+	TokenStorePath string // optional path for token persistence
 }
 
 // New creates a new Server instance
 func New(cfg Config) *Server {
 	hub := NewHub()
-	store := token.NewStore()
+	
+	var store *token.Store
+	var err error
+	if cfg.TokenStorePath != "" {
+		store, err = token.NewStoreWithFile(cfg.TokenStorePath)
+		if err != nil {
+			slog.Error("failed to load token store", "error", err)
+			store = token.NewStore() // fallback to in-memory
+		}
+	} else {
+		store = token.NewStore()
+	}
+	
 	mgr := token.NewManager(cfg.JWTSecret, store)
 	audit := NewAuditLog()
+
+	logger := slog.Default()
 
 	srv := &Server{
 		hub:          hub,
@@ -56,7 +77,9 @@ func New(cfg Config) *Server {
 		tokenStore:   store,
 		audit:        audit,
 		dispatcher:   NewDispatcher(),
+		rateLimiter:  NewRateLimiter(10, time.Second, 30), // 10 req/s, burst 30
 		startTime:    time.Now(),
+		logger:       logger,
 	}
 
 	mux := http.NewServeMux()
@@ -67,10 +90,11 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("/clients", srv.adminAuth(srv.handleClients))
 	mux.HandleFunc("/command", srv.adminAuth(srv.handleCommand))
 	mux.HandleFunc("/audit", srv.adminAuth(srv.handleAudit))
+	mux.HandleFunc("/metrics", srv.handleMetrics)
 
 	srv.httpServer = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler: mux,
+		Handler: srv.rateLimiter.Middleware(mux),
 	}
 
 	return srv
@@ -97,13 +121,24 @@ func (s *Server) handleTokenRoute(w http.ResponseWriter, r *http.Request) {
 
 // Start starts the HTTP server
 func (s *Server) Start() error {
-	log.Printf("Starting relay server on %s", s.httpServer.Addr)
+	s.logger.Info("starting relay server", "addr", s.httpServer.Addr)
 	return s.httpServer.ListenAndServe()
 }
 
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.httpServer.Shutdown(ctx)
+	s.logger.Info("shutting down server, draining connections...")
+	
+	// Close all WebSocket connections first
+	s.hub.CloseAll()
+	
+	// Then shut down the HTTP server
+	if err := s.httpServer.Shutdown(ctx); err != nil {
+		return err
+	}
+	
+	s.logger.Info("server shutdown complete")
+	return nil
 }
 
 // handleHealth returns server health status
@@ -120,15 +155,27 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("websocket upgrade error: %v", err)
+		s.logger.Error("websocket upgrade error", "error", err)
 		return
 	}
 
+	s.totalConnections.Add(1)
 	conn := NewConnection(ws, s.hub)
 	conn.SetMessageHandler(func(env *protocol.Envelope) {
 		s.handleMessage(conn, env)
 	})
 	conn.Start()
+}
+
+// handleMetrics returns basic metrics in JSON format
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"connected_clients":  s.hub.Count(),
+		"total_connections": s.totalConnections.Load(),
+		"total_commands":    s.totalCommands.Load(),
+		"uptime_seconds":    time.Since(s.startTime).Seconds(),
+	})
 }
 
 // handleMessage processes incoming messages
@@ -141,7 +188,7 @@ func (s *Server) handleMessage(conn *Connection, env *protocol.Envelope) {
 	case protocol.TypeAck:
 		s.handleAckMessage(conn, env)
 	default:
-		log.Printf("unknown message type: %s", env.Type)
+		s.logger.Warn("unknown message type", "type", env.Type)
 	}
 }
 
@@ -149,7 +196,7 @@ func (s *Server) handleMessage(conn *Connection, env *protocol.Envelope) {
 func (s *Server) handleHello(conn *Connection, env *protocol.Envelope) {
 	var payload protocol.HelloPayload
 	if err := env.UnmarshalPayload(&payload); err != nil {
-		log.Printf("invalid hello payload: %v", err)
+		s.logger.Warn("invalid hello payload", "error", err)
 		s.sendError(conn, env.ID, "invalid hello payload")
 		conn.Close()
 		return
@@ -164,7 +211,7 @@ func (s *Server) handleHello(conn *Connection, env *protocol.Envelope) {
 	// Validate JWT token
 	claims, err := s.tokenManager.Validate(payload.Token)
 	if err != nil {
-		log.Printf("auth failed for %s: %v", payload.ClawID, err)
+		s.logger.Warn("auth failed", "claw_id", payload.ClawID, "error", err)
 		s.sendError(conn, env.ID, "authentication failed: "+err.Error())
 		conn.Close()
 		return
@@ -172,7 +219,7 @@ func (s *Server) handleHello(conn *Connection, env *protocol.Envelope) {
 
 	// Verify claw_id matches token
 	if claims.ClawID != payload.ClawID {
-		log.Printf("claw_id mismatch: token=%s, payload=%s", claims.ClawID, payload.ClawID)
+		s.logger.Warn("claw_id mismatch", "token_claw_id", claims.ClawID, "payload_claw_id", payload.ClawID)
 		s.sendError(conn, env.ID, "claw_id does not match token")
 		conn.Close()
 		return
@@ -194,14 +241,14 @@ func (s *Server) handleHello(conn *Connection, env *protocol.Envelope) {
 	ackEnv, _ := protocol.New(protocol.TypeAck, ack)
 	conn.Send(ackEnv)
 
-	log.Printf("client authenticated: %s", payload.ClawID)
+	s.logger.Info("client authenticated", "claw_id", payload.ClawID)
 }
 
 // handleAckMessage routes ack messages to the dispatcher
 func (s *Server) handleAckMessage(conn *Connection, env *protocol.Envelope) {
 	var payload protocol.AckPayload
 	if err := env.UnmarshalPayload(&payload); err != nil {
-		log.Printf("invalid ack payload: %v", err)
+		s.logger.Warn("invalid ack payload", "error", err)
 		return
 	}
 
@@ -218,7 +265,7 @@ func (s *Server) handleAckMessage(conn *Connection, env *protocol.Envelope) {
 	}
 
 	if !s.dispatcher.Resolve(refID, result) {
-		log.Printf("no pending command for ack %s", refID)
+		s.logger.Debug("no pending command for ack", "ref_id", refID)
 	}
 }
 
@@ -227,4 +274,5 @@ func (s *Server) sendError(conn *Connection, refID string, msg string) {
 	ack := protocol.AckPayload{Status: "error", Error: msg}
 	env, _ := protocol.New(protocol.TypeAck, ack)
 	conn.Send(env)
+	s.logger.Warn("sent error ack", "ref_id", refID, "error", msg)
 }

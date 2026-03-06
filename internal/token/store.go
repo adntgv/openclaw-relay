@@ -1,6 +1,9 @@
 package token
 
 import (
+	"encoding/json"
+	"log/slog"
+	"os"
 	"sync"
 	"time"
 )
@@ -15,12 +18,13 @@ type Token struct {
 	RevokedAt *time.Time
 }
 
-// Store manages tokens in memory
+// Store manages tokens in memory with optional file persistence
 type Store struct {
-	mu       sync.RWMutex
-	tokens   map[string]*Token // indexed by JTI
-	revoked  map[string]bool   // revoked JTIs
-	byClawID map[string][]*Token
+	mu        sync.RWMutex
+	tokens    map[string]*Token // indexed by JTI
+	revoked   map[string]bool   // revoked JTIs
+	byClawID  map[string][]*Token
+	filePath  string // optional file path for persistence
 }
 
 // NewStore creates a new token store
@@ -32,6 +36,105 @@ func NewStore() *Store {
 	}
 }
 
+// NewStoreWithFile creates a token store with file-backed persistence
+func NewStoreWithFile(filePath string) (*Store, error) {
+	s := &Store{
+		tokens:   make(map[string]*Token),
+		revoked:  make(map[string]bool),
+		byClawID: make(map[string][]*Token),
+		filePath: filePath,
+	}
+	
+	// Load existing tokens from file
+	if err := s.Load(); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	
+	return s, nil
+}
+
+// persistedStore represents the JSON structure for persistence
+type persistedStore struct {
+	Tokens  []*Token `json:"tokens"`
+	Revoked []string `json:"revoked"`
+}
+
+// Load reads tokens from the file
+func (s *Store) Load() error {
+	if s.filePath == "" {
+		return nil // no persistence configured
+	}
+	
+	data, err := os.ReadFile(s.filePath)
+	if err != nil {
+		return err
+	}
+	
+	var ps persistedStore
+	if err := json.Unmarshal(data, &ps); err != nil {
+		return err
+	}
+	
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	// Rebuild in-memory structures
+	for _, token := range ps.Tokens {
+		s.tokens[token.JTI] = token
+		s.byClawID[token.ClawID] = append(s.byClawID[token.ClawID], token)
+	}
+	
+	for _, jti := range ps.Revoked {
+		s.revoked[jti] = true
+	}
+	
+	slog.Info("loaded tokens from file", "path", s.filePath, "count", len(ps.Tokens))
+	return nil
+}
+
+// Save writes tokens to the file
+func (s *Store) Save() error {
+	if s.filePath == "" {
+		return nil // no persistence configured
+	}
+	
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	
+	// Collect all tokens and revoked JTIs
+	tokens := make([]*Token, 0, len(s.tokens))
+	for _, token := range s.tokens {
+		tokens = append(tokens, token)
+	}
+	
+	revoked := make([]string, 0, len(s.revoked))
+	for jti := range s.revoked {
+		revoked = append(revoked, jti)
+	}
+	
+	ps := persistedStore{
+		Tokens:  tokens,
+		Revoked: revoked,
+	}
+	
+	data, err := json.MarshalIndent(ps, "", "  ")
+	if err != nil {
+		return err
+	}
+	
+	// Write atomically via temp file
+	tmpPath := s.filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+		return err
+	}
+	
+	if err := os.Rename(tmpPath, s.filePath); err != nil {
+		return err
+	}
+	
+	return nil
+}
+
 // Add adds a token to the store
 func (s *Store) Add(token Token) {
 	s.mu.Lock()
@@ -39,6 +142,11 @@ func (s *Store) Add(token Token) {
 
 	s.tokens[token.JTI] = &token
 	s.byClawID[token.ClawID] = append(s.byClawID[token.ClawID], &token)
+	
+	// Persist if configured
+	s.mu.Unlock()
+	s.Save()
+	s.mu.Lock()
 }
 
 // Get retrieves a token by JTI
@@ -74,6 +182,11 @@ func (s *Store) Revoke(jti string) error {
 	now := time.Now()
 	token.RevokedAt = &now
 	s.revoked[jti] = true
+	
+	// Persist if configured
+	s.mu.Unlock()
+	s.Save()
+	s.mu.Lock()
 
 	return nil
 }

@@ -2,7 +2,7 @@ package client
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"math"
 	"os"
 	"os/signal"
@@ -54,7 +54,7 @@ func (c *Client) Run() error {
 	for {
 		select {
 		case <-stop:
-			log.Println("Shutting down client...")
+			slog.Info("shutting down client...")
 			c.close()
 			return nil
 		default:
@@ -63,7 +63,7 @@ func (c *Client) Run() error {
 		err := c.connect()
 		if err != nil {
 			delay := backoff(attempt)
-			log.Printf("Connection failed: %v. Retrying in %s...", err, delay)
+			slog.Warn("connection failed, retrying", "error", err, "delay", delay)
 			time.Sleep(delay)
 			attempt++
 			continue
@@ -71,7 +71,7 @@ func (c *Client) Run() error {
 
 		attempt = 0 // Reset on successful connection
 		c.readLoop()
-		log.Println("Disconnected. Reconnecting...")
+		slog.Info("disconnected, reconnecting...")
 	}
 }
 
@@ -124,7 +124,7 @@ func (c *Client) connect() error {
 		return &AuthError{Message: ack.Error}
 	}
 
-	log.Printf("Connected as %s", c.cfg.ClawID)
+	slog.Info("connected", "claw_id", c.cfg.ClawID)
 	return nil
 }
 
@@ -134,14 +134,14 @@ func (c *Client) readLoop() {
 		_, msg, err := c.ws.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("Read error: %v", err)
+				slog.Warn("read error", "error", err)
 			}
 			return
 		}
 
 		env, err := protocol.Unmarshal(msg)
 		if err != nil {
-			log.Printf("Invalid message: %v", err)
+			slog.Warn("invalid message", "error", err)
 			continue
 		}
 
@@ -161,7 +161,7 @@ func (c *Client) handleCommand(env *protocol.Envelope) {
 		return
 	}
 
-	log.Printf("Executing command: %s", payload.Cmd)
+	slog.Info("executing command", "cmd", payload.Cmd)
 
 	result, err := c.handler.Execute(payload.Cmd, payload.Args)
 	if err != nil {

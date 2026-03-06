@@ -7,7 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -77,21 +77,25 @@ func runServer(args []string) {
 	port := fs.Int("port", 8080, "Port to listen on")
 	adminToken := fs.String("admin-token", "", "Admin API authentication token (required)")
 	jwtSecret := fs.String("jwt-secret", "", "JWT signing secret (required)")
+	tokenStore := fs.String("token-store", "", "Path to token store JSON file (optional, for persistence)")
 
 	fs.Parse(args)
 
 	if *adminToken == "" {
-		log.Fatal("--admin-token is required")
+		slog.Error("--admin-token is required")
+		os.Exit(1)
 	}
 	if *jwtSecret == "" {
-		log.Fatal("--jwt-secret is required")
+		slog.Error("--jwt-secret is required")
+		os.Exit(1)
 	}
 
 	cfg := server.Config{
-		Host:       *host,
-		Port:       *port,
-		AdminToken: *adminToken,
-		JWTSecret:  *jwtSecret,
+		Host:           *host,
+		Port:           *port,
+		AdminToken:     *adminToken,
+		JWTSecret:      *jwtSecret,
+		TokenStorePath: *tokenStore,
 	}
 
 	srv := server.New(cfg)
@@ -103,24 +107,26 @@ func runServer(args []string) {
 	// Start server in goroutine
 	go func() {
 		if err := srv.Start(); err != nil {
-			log.Fatalf("server error: %v", err)
+			slog.Error("server error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
-	log.Printf("Relay server started on %s:%d", *host, *port)
+	slog.Info("relay server started", "host", *host, "port", *port)
 
 	// Wait for shutdown signal
 	<-stop
-	log.Println("Shutting down server...")
+	slog.Info("shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("server shutdown error: %v", err)
+		slog.Error("server shutdown error", "error", err)
+		os.Exit(1)
 	}
 
-	log.Println("Server stopped")
+	slog.Info("server stopped")
 }
 
 func runClient(args []string) {
@@ -135,7 +141,8 @@ func runClient(args []string) {
 
 	cfg, err := config.Load(*configFile)
 	if err != nil {
-		log.Fatalf("config error: %v", err)
+		slog.Error("config error", "error", err)
+		os.Exit(1)
 	}
 
 	// CLI flags override config/env
@@ -153,12 +160,14 @@ func runClient(args []string) {
 	}
 
 	if cfg.URL == "" || cfg.Token == "" || cfg.ClawID == "" {
-		log.Fatal("--url, --token, and --claw-id are required")
+		slog.Error("--url, --token, and --claw-id are required")
+		os.Exit(1)
 	}
 
 	client := relayclient.New(cfg)
 	if err := client.Run(); err != nil {
-		log.Fatalf("client error: %v", err)
+		slog.Error("client error", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -240,20 +249,23 @@ func adminRequest(method, url, adminToken string, body []byte) string {
 	}
 	req, err := http.NewRequest(method, url, reqBody)
 	if err != nil {
-		log.Fatalf("request error: %v", err)
+		slog.Error("request error", "error", err)
+		os.Exit(1)
 	}
 	req.Header.Set("X-Admin-Token", adminToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Fatalf("request failed: %v", err)
+		slog.Error("request failed", "error", err)
+		os.Exit(1)
 	}
 	defer resp.Body.Close()
 
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		log.Fatalf("server error (%d): %s", resp.StatusCode, string(data))
+		slog.Error("server error", "status", resp.StatusCode, "body", string(data))
+		os.Exit(1)
 	}
 	return string(data)
 }

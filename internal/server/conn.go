@@ -3,7 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -112,14 +112,14 @@ func (c *Connection) readPump() {
 		_, message, err := c.ws.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("websocket error: %v", err)
+				slog.Warn("websocket error", "error", err, "claw_id", c.clawID)
 			}
 			return
 		}
 
 		env, err := protocol.Unmarshal(message)
 		if err != nil {
-			log.Printf("invalid envelope: %v", err)
+			slog.Warn("invalid envelope", "error", err, "claw_id", c.clawID)
 			continue
 		}
 

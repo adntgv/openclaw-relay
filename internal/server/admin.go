@@ -134,6 +134,15 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-token rate limiting
+	if !s.rateLimiter.AllowToken(req.ClawID) {
+		s.logger.Warn("command rate limited", "claw_id", req.ClawID)
+		http.Error(w, `{"error":"rate limit exceeded for this token"}`, http.StatusTooManyRequests)
+		return
+	}
+
+	s.totalCommands.Add(1)
+
 	// Create command envelope
 	cmdPayload := map[string]interface{}{
 		"cmd":  req.Cmd,
@@ -141,6 +150,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	cmdEnv, err := protocol.New(protocol.TypeCommand, cmdPayload)
 	if err != nil {
+		s.logger.Error("failed to create command", "error", err)
 		http.Error(w, `{"error":"failed to create command"}`, http.StatusInternalServerError)
 		return
 	}
@@ -152,6 +162,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	// Send command to client
 	if err := client.Conn.Send(cmdEnv); err != nil {
 		s.audit.Log("command.send_failed", req.ClawID, "cmd="+req.Cmd)
+		s.logger.Error("failed to send command to client", "claw_id", req.ClawID, "cmd", req.Cmd, "error", err)
 		http.Error(w, `{"error":"failed to send command to client"}`, http.StatusInternalServerError)
 		return
 	}
@@ -162,10 +173,12 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	select {
 	case result := <-pending.Response:
 		s.audit.Log("command.ack", req.ClawID, "cmd="+req.Cmd+" status="+result.Status)
+		s.logger.Info("command ack", "claw_id", req.ClawID, "cmd", req.Cmd, "status", result.Status)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
 	case <-time.After(commandTimeout):
 		s.audit.Log("command.timeout", req.ClawID, "cmd="+req.Cmd)
+		s.logger.Warn("command timeout", "claw_id", req.ClawID, "cmd", req.Cmd)
 		http.Error(w, `{"error":"command timed out"}`, http.StatusGatewayTimeout)
 	}
 }

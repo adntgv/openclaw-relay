@@ -66,3 +66,16 @@ func (h *Hub) Count() int {
 	defer h.mu.RUnlock()
 	return len(h.clients)
 }
+
+// CloseAll gracefully closes all connections
+func (h *Hub) CloseAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	
+	for _, client := range h.clients {
+		client.Conn.Close()
+	}
+	
+	// Clear the map
+	h.clients = make(map[string]*Client)
+}
