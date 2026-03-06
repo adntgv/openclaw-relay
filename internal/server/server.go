@@ -30,6 +30,7 @@ type Server struct {
 	tokenManager *token.Manager
 	tokenStore   *token.Store
 	audit        *AuditLog
+	dispatcher   *Dispatcher
 	startTime    time.Time
 }
 
@@ -54,6 +55,7 @@ func New(cfg Config) *Server {
 		tokenManager: mgr,
 		tokenStore:   store,
 		audit:        audit,
+		dispatcher:   NewDispatcher(),
 		startTime:    time.Now(),
 	}
 
@@ -137,7 +139,7 @@ func (s *Server) handleMessage(conn *Connection, env *protocol.Envelope) {
 	case protocol.TypePong:
 		// alive
 	case protocol.TypeAck:
-		// Phase 3
+		s.handleAckMessage(conn, env)
 	default:
 		log.Printf("unknown message type: %s", env.Type)
 	}
@@ -193,6 +195,31 @@ func (s *Server) handleHello(conn *Connection, env *protocol.Envelope) {
 	conn.Send(ackEnv)
 
 	log.Printf("client authenticated: %s", payload.ClawID)
+}
+
+// handleAckMessage routes ack messages to the dispatcher
+func (s *Server) handleAckMessage(conn *Connection, env *protocol.Envelope) {
+	var payload protocol.AckPayload
+	if err := env.UnmarshalPayload(&payload); err != nil {
+		log.Printf("invalid ack payload: %v", err)
+		return
+	}
+
+	// Use RefID to find the original command, fall back to envelope ID
+	refID := payload.RefID
+	if refID == "" {
+		refID = env.ID
+	}
+
+	result := &AckResult{
+		Status: payload.Status,
+		Result: payload.Result,
+		Error:  payload.Error,
+	}
+
+	if !s.dispatcher.Resolve(refID, result) {
+		log.Printf("no pending command for ack %s", refID)
+	}
 }
 
 // sendError sends an error ack to a connection

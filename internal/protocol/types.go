@@ -26,7 +26,8 @@ type CommandPayload struct {
 
 // AckPayload contains command execution result
 type AckPayload struct {
-	Status string                 `json:"status"` // "ok" or "error"
+	RefID  string                 `json:"ref_id,omitempty"` // references the command envelope ID
+	Status string                 `json:"status"`           // "ok" or "error"
 	Result map[string]interface{} `json:"result,omitempty"`
 	Error  string                 `json:"error,omitempty"`
 }

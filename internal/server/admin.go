@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/adntgv/openclaw-relay/internal/protocol"
 )
 
 // adminAuth middleware checks X-Admin-Token header
@@ -131,12 +134,40 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.audit.Log("command.dispatch", req.ClawID, "cmd="+req.Cmd)
+	// Create command envelope
+	cmdPayload := map[string]interface{}{
+		"cmd":  req.Cmd,
+		"args": req.Args,
+	}
+	cmdEnv, err := protocol.New(protocol.TypeCommand, cmdPayload)
+	if err != nil {
+		http.Error(w, `{"error":"failed to create command"}`, http.StatusInternalServerError)
+		return
+	}
 
-	// Full dispatch implemented in Phase 3
-	_ = client
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "dispatched", "result": "stub - full dispatch in Phase 3"})
+	// Register pending command
+	pending := s.dispatcher.Register(cmdEnv.ID, req.ClawID, req.Cmd)
+	defer s.dispatcher.Remove(cmdEnv.ID)
+
+	// Send command to client
+	if err := client.Conn.Send(cmdEnv); err != nil {
+		s.audit.Log("command.send_failed", req.ClawID, "cmd="+req.Cmd)
+		http.Error(w, `{"error":"failed to send command to client"}`, http.StatusInternalServerError)
+		return
+	}
+
+	s.audit.Log("command.dispatch", req.ClawID, "cmd="+req.Cmd+" id="+cmdEnv.ID)
+
+	// Wait for ack with timeout
+	select {
+	case result := <-pending.Response:
+		s.audit.Log("command.ack", req.ClawID, "cmd="+req.Cmd+" status="+result.Status)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
+	case <-time.After(commandTimeout):
+		s.audit.Log("command.timeout", req.ClawID, "cmd="+req.Cmd)
+		http.Error(w, `{"error":"command timed out"}`, http.StatusGatewayTimeout)
+	}
 }
 
 // handleAudit handles GET /audit
