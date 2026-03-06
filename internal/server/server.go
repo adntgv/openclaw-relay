@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/adntgv/openclaw-relay/internal/protocol"
+	"github.com/adntgv/openclaw-relay/internal/token"
 	"github.com/gorilla/websocket"
 )
 
@@ -16,16 +18,19 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for now
+		return true
 	},
 }
 
 // Server is the main relay server
 type Server struct {
-	hub        *Hub
-	httpServer *http.Server
-	adminToken string
-	startTime  time.Time
+	hub          *Hub
+	httpServer   *http.Server
+	adminToken   string
+	tokenManager *token.Manager
+	tokenStore   *token.Store
+	audit        *AuditLog
+	startTime    time.Time
 }
 
 // Config holds server configuration
@@ -33,21 +38,33 @@ type Config struct {
 	Host       string
 	Port       int
 	AdminToken string
+	JWTSecret  string
 }
 
 // New creates a new Server instance
 func New(cfg Config) *Server {
 	hub := NewHub()
+	store := token.NewStore()
+	mgr := token.NewManager(cfg.JWTSecret, store)
+	audit := NewAuditLog()
 
 	srv := &Server{
-		hub:        hub,
-		adminToken: cfg.AdminToken,
-		startTime:  time.Now(),
+		hub:          hub,
+		adminToken:   cfg.AdminToken,
+		tokenManager: mgr,
+		tokenStore:   store,
+		audit:        audit,
+		startTime:    time.Now(),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.handleHealth)
 	mux.HandleFunc("/ws", srv.handleWebSocket)
+	mux.HandleFunc("/token", srv.adminAuth(srv.handleTokenRoute))
+	mux.HandleFunc("/token/", srv.adminAuth(srv.handleTokenRoute))
+	mux.HandleFunc("/clients", srv.adminAuth(srv.handleClients))
+	mux.HandleFunc("/command", srv.adminAuth(srv.handleCommand))
+	mux.HandleFunc("/audit", srv.adminAuth(srv.handleAudit))
 
 	srv.httpServer = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
@@ -55,6 +72,25 @@ func New(cfg Config) *Server {
 	}
 
 	return srv
+}
+
+// handleTokenRoute dispatches POST /token vs DELETE /token/{jti}
+func (s *Server) handleTokenRoute(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/token")
+	path = strings.TrimPrefix(path, "/")
+
+	if r.Method == http.MethodPost && path == "" {
+		s.handleTokenIssue(w, r)
+		return
+	}
+	if r.Method == http.MethodDelete && path != "" {
+		// path is the JTI
+		s.tokenManager.Revoke(path)
+		s.audit.Log("token.revoke", "", "jti="+path)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 }
 
 // Start starts the HTTP server
@@ -70,19 +106,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // handleHealth returns server health status
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	uptime := time.Since(s.startTime).Seconds()
-
-	response := map[string]interface{}{
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "ok",
 		"clients": s.hub.Count(),
-		"uptime":  uptime,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+		"uptime":  time.Since(s.startTime).Seconds(),
+	})
 }
 
-// handleWebSocket handles WebSocket upgrade and client connection
+// handleWebSocket handles WebSocket upgrade
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -91,12 +123,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn := NewConnection(ws, s.hub)
-	
-	// Set message handler for authentication
 	conn.SetMessageHandler(func(env *protocol.Envelope) {
 		s.handleMessage(conn, env)
 	})
-
 	conn.Start()
 }
 
@@ -106,26 +135,43 @@ func (s *Server) handleMessage(conn *Connection, env *protocol.Envelope) {
 	case protocol.TypeHello:
 		s.handleHello(conn, env)
 	case protocol.TypePong:
-		// Pong received, connection is alive
+		// alive
 	case protocol.TypeAck:
-		// Command acknowledgment (handled in Phase 3)
+		// Phase 3
 	default:
 		log.Printf("unknown message type: %s", env.Type)
 	}
 }
 
-// handleHello processes hello messages and authenticates clients
+// handleHello authenticates and registers clients
 func (s *Server) handleHello(conn *Connection, env *protocol.Envelope) {
 	var payload protocol.HelloPayload
 	if err := env.UnmarshalPayload(&payload); err != nil {
 		log.Printf("invalid hello payload: %v", err)
+		s.sendError(conn, env.ID, "invalid hello payload")
 		conn.Close()
 		return
 	}
 
-	// Basic validation (full JWT auth in Phase 2)
 	if payload.ClawID == "" {
-		log.Printf("hello missing claw_id")
+		s.sendError(conn, env.ID, "claw_id is required")
+		conn.Close()
+		return
+	}
+
+	// Validate JWT token
+	claims, err := s.tokenManager.Validate(payload.Token)
+	if err != nil {
+		log.Printf("auth failed for %s: %v", payload.ClawID, err)
+		s.sendError(conn, env.ID, "authentication failed: "+err.Error())
+		conn.Close()
+		return
+	}
+
+	// Verify claw_id matches token
+	if claims.ClawID != payload.ClawID {
+		log.Printf("claw_id mismatch: token=%s, payload=%s", claims.ClawID, payload.ClawID)
+		s.sendError(conn, env.ID, "claw_id does not match token")
 		conn.Close()
 		return
 	}
@@ -139,20 +185,19 @@ func (s *Server) handleHello(conn *Connection, env *protocol.Envelope) {
 		ConnectedAt:  time.Now(),
 	}
 	s.hub.Register(payload.ClawID, client)
+	s.audit.Log("client.connect", payload.ClawID, "caps="+strings.Join(payload.Capabilities, ","))
 
 	// Send ack
-	ackPayload := protocol.AckPayload{
-		Status: "ok",
-	}
-	ackEnv, err := protocol.New(protocol.TypeAck, ackPayload)
-	if err != nil {
-		log.Printf("failed to create ack: %v", err)
-		return
-	}
+	ack := protocol.AckPayload{Status: "ok"}
+	ackEnv, _ := protocol.New(protocol.TypeAck, ack)
+	conn.Send(ackEnv)
 
-	if err := conn.Send(ackEnv); err != nil {
-		log.Printf("failed to send ack: %v", err)
-	}
+	log.Printf("client authenticated: %s", payload.ClawID)
+}
 
-	log.Printf("client connected: %s (capabilities: %v)", payload.ClawID, payload.Capabilities)
+// sendError sends an error ack to a connection
+func (s *Server) sendError(conn *Connection, refID string, msg string) {
+	ack := protocol.AckPayload{Status: "error", Error: msg}
+	env, _ := protocol.New(protocol.TypeAck, ack)
+	conn.Send(env)
 }

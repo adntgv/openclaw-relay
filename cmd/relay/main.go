@@ -64,17 +64,22 @@ func runServer(args []string) {
 	host := fs.String("host", "0.0.0.0", "Host to bind to")
 	port := fs.Int("port", 8080, "Port to listen on")
 	adminToken := fs.String("admin-token", "", "Admin API authentication token (required)")
+	jwtSecret := fs.String("jwt-secret", "", "JWT signing secret (required)")
 
 	fs.Parse(args)
 
 	if *adminToken == "" {
 		log.Fatal("--admin-token is required")
 	}
+	if *jwtSecret == "" {
+		log.Fatal("--jwt-secret is required")
+	}
 
 	cfg := server.Config{
 		Host:       *host,
 		Port:       *port,
 		AdminToken: *adminToken,
+		JWTSecret:  *jwtSecret,
 	}
 
 	srv := server.New(cfg)
