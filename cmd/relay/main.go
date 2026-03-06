@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -81,12 +82,31 @@ func runServer(args []string) {
 
 	fs.Parse(args)
 
+	// Env var fallbacks
 	if *adminToken == "" {
-		slog.Error("--admin-token is required")
+		*adminToken = os.Getenv("RELAY_ADMIN_TOKEN")
+	}
+	if *jwtSecret == "" {
+		*jwtSecret = os.Getenv("RELAY_JWT_SECRET")
+	}
+	if envHost := os.Getenv("RELAY_HOST"); envHost != "" && *host == "0.0.0.0" {
+		*host = envHost
+	}
+	if envPort := os.Getenv("RELAY_PORT"); envPort != "" && *port == 8080 {
+		if p, err := strconv.Atoi(envPort); err == nil {
+			*port = p
+		}
+	}
+	if envStore := os.Getenv("RELAY_TOKEN_STORE"); envStore != "" && *tokenStore == "" {
+		*tokenStore = envStore
+	}
+
+	if *adminToken == "" {
+		slog.Error("--admin-token or RELAY_ADMIN_TOKEN is required")
 		os.Exit(1)
 	}
 	if *jwtSecret == "" {
-		slog.Error("--jwt-secret is required")
+		slog.Error("--jwt-secret or RELAY_JWT_SECRET is required")
 		os.Exit(1)
 	}
 
