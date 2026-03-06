@@ -7,9 +7,12 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	relayclient "github.com/adntgv/openclaw-relay/internal/client"
+	"github.com/adntgv/openclaw-relay/internal/config"
 	"github.com/adntgv/openclaw-relay/internal/server"
 )
 
@@ -25,8 +28,7 @@ func main() {
 	case "server":
 		runServer(os.Args[2:])
 	case "client":
-		fmt.Println("client subcommand not implemented yet (Phase 4)")
-		os.Exit(1)
+		runClient(os.Args[2:])
 	case "token":
 		fmt.Println("token subcommand not implemented yet (Phase 5)")
 		os.Exit(1)
@@ -109,4 +111,43 @@ func runServer(args []string) {
 	}
 
 	log.Println("Server stopped")
+}
+
+func runClient(args []string) {
+	fs := flag.NewFlagSet("client", flag.ExitOnError)
+	url := fs.String("url", "", "Relay server WebSocket URL (ws://host:port/ws)")
+	token := fs.String("token", "", "JWT token for authentication")
+	clawID := fs.String("claw-id", "", "Client identifier")
+	capabilities := fs.String("capabilities", "shell", "Comma-separated capabilities")
+	configFile := fs.String("config", "", "Path to YAML config file")
+
+	fs.Parse(args)
+
+	cfg, err := config.Load(*configFile)
+	if err != nil {
+		log.Fatalf("config error: %v", err)
+	}
+
+	// CLI flags override config/env
+	if *url != "" {
+		cfg.URL = *url
+	}
+	if *token != "" {
+		cfg.Token = *token
+	}
+	if *clawID != "" {
+		cfg.ClawID = *clawID
+	}
+	if *capabilities != "shell" || len(cfg.Capabilities) == 0 {
+		cfg.Capabilities = strings.Split(*capabilities, ",")
+	}
+
+	if cfg.URL == "" || cfg.Token == "" || cfg.ClawID == "" {
+		log.Fatal("--url, --token, and --claw-id are required")
+	}
+
+	client := relayclient.New(cfg)
+	if err := client.Run(); err != nil {
+		log.Fatalf("client error: %v", err)
+	}
 }
